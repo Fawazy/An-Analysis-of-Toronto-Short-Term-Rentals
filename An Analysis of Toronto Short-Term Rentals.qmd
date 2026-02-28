@@ -1,11 +1,7 @@
 ---
-title: "An Analysis of Toronto Short-Term Rentals - Part 3 (Final Writeup)"
+title: "An Analysis of Toronto Short-Term Rentals"
 author:
-  - name: "Group 12"
-  - name: "Yiping Liu (ID: 0870378)"
-  - name: "Dmitry Mishchenko (ID: 0512776)"
-  - name: "Mohammed Muzammil (ID: 0885649)"
-  - name: "Fawaz Yahya (ID: 0867165)"
+  - name: "Fawaz Yahya"
 date: "2025-11-15"
 format:
   pdf:
@@ -390,5 +386,5 @@ Overall, the analysis highlights the importance of both property characteristics
 :::
 
 ## Acknowledgment
-We thank all members of Group 12 for their collaboration and contributions throughout the data preparation, analysis, and writing of this report. OpenAI’s ChatGPT was used to assist with code debugging, table formatting, and grammar refinement during the preparation of this report. All statistical analyses, interpretation of results, and final writing decisions were made by the authors.
+ OpenAI’s ChatGPT was used to assist with code debugging, table formatting, and grammar refinement during the preparation of this report. All statistical analyses, interpretation of results, and final writing decisions were made by the authors.
 
