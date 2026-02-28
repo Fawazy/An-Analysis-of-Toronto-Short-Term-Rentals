@@ -1,0 +1,473 @@
+---
+title: "An Analysis of Toronto Short-Term Rentals - Part 3"
+author:
+  - name: "Group 12"
+  - name: "Yiping Liu (ID: 0870378)"
+  - name: "Dmitry Mishchenko (ID: 0512776)"
+  - name: "Mohammed Muzammil (ID: 0885649)"
+  - name: "Fawaz Yahya (ID: 0867165)"
+date: "2025-11-15"
+format: 
+  pdf:
+    number-sections: true
+    toc: false
+    fontsize: 11pt
+    geometry:
+      - margin=1in
+    include-in-header:
+       text: |
+         \usepackage{float}
+         \floatplacement{table}{H}
+         \floatplacement{figure}{H}
+         \usepackage[hyphens]{url}
+         \usepackage{url}  
+         \urlstyle{tt} 
+         \usepackage[none]{hyphenat} 
+         \usepackage{ragged2e}
+         \usepackage{threeparttable}
+    documentclass: article
+title-block-style: default
+title-block-categories: false
+title-block-banner: false
+execute:
+  echo: false
+  message: false
+  warning: false
+bibliography: references.bib
+csl: ieee.csl
+link-citations: true
+---
+```{r}
+#| label: setup
+#| echo: false
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(janitor)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+library(infer)
+library(broom)
+library(rstatix)
+library(psych)
+library(ggplot2)
+library(ggfortify)
+
+theme_set(theme_bw()) 
+```
+# Executive Summary
+
+This report investigates the factors that influence nightly Airbnb prices in Toronto and evaluates whether neighbourhood demand levels are associated with differences in listing characteristics. The analysis focuses on three main predictors of price: accommodation capacity, neighbourhood demand group (High, Middle, Low), and review score rating. In addition, two hypothesis tests proposed in Part 2 examine whether High-demand and Low-demand neighbourhoods differ in average accommodation capacity and average review score rating.
+
+A multiple linear regression model was fitted using the cleaned Airbnb dataset to quantify the relationship between nightly price and the three selected predictors. All predictors were statistically significant. Listings that accommodate more guests, receive higher review ratings, and are located in high-demand neighbourhoods tend to charge higher nightly prices. Specifically, each additional guest capacity increases price by approximately $38, and each additional rating point increases price by roughly $40. Compared to High-demand neighbourhoods, listings in Low-demand areas charge about $66 less per night, while those in Middle-demand areas charge about $51 less. The model explains approximately 48% of the variation in nightly prices, indicating that while the included variables are important, additional unmeasured factors likely influence pricing.
+
+Model diagnostics show that assumptions of linearity, normality, and homoscedasticity are reasonably satisfied, with only mild deviations typical of real-world price data. No influential outliers were detected, supporting the reliability of the regression results.
+
+To assess neighbourhood differences, two Welch t-tests were conducted. High-demand neighbourhoods were found to have significantly higher accommodation capacity than Low-demand neighbourhoods. Review score ratings were also statistically higher in High-demand areas; however, the difference was extremely small, suggesting that guest satisfaction is similar across neighbourhood types despite differences in demand.
+
+Overall, the analysis concludes that neighbourhood demand level, accommodation capacity, and review score rating are key determinants of Airbnb pricing in Toronto. High-demand areas tend to host larger listings and command higher prices, although guest ratings remain similar across neighbourhoods. These findings offer meaningful insights for Airbnb hosts, guests, and policymakers seeking to understand pricing patterns within the city.
+
+\newpage
+
+# Background
+
+## Brief Dataset Reminder
+
+This project uses the **Toronto Airbnb listings dataset** downloaded from *Inside Airbnb*[@inside_airbnb] on **September 11, 2025**. Inside Airbnb is a non-commercial project that regularly scrapes and curates data to support community and policy discussions about short-term rental impacts.
+
+
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+
+      #| label: tbl-variable-dictionary
+#| echo: false
+#| tbl-cap: "Key variables used in the analysis."
+
+var_dict_cat <- tribble(
+  ~Variable, ~Description, ~Type,
+  "price", "Nightly listing price (CAD)", "Numeric (continuous)",
+  "neigh_group", "Neighbourhood demand group (High/Medium/Low)", "Categorical (ordinal)",
+  "accommodates", "Maximum number of guests accommodated", "Numeric (integer)",
+  "review_scores_rating", "Overall rating score (0–5)", "Numeric (continuous)"
+)
+
+var_dict_cat |>
+  kable(
+    col.names = c("Variable", "Description", "Type"),
+    align = c("l", "l", "l"),
+    booktabs = TRUE
+  ) |>
+  kable_styling(
+    full_width = FALSE,
+    position = "center",
+    font_size = 11,
+    bootstrap_options = c("condensed", "responsive"),
+    latex_options = c("hold_position", "striped")
+  ) |>
+  column_spec(1, width = "3cm") |>
+  column_spec(2, width = "10cm") |>
+  column_spec(3, width = "3cm") |>
+  add_footnote(
+    label = "Note: 'neigh_group' is derived from 'neighbourhood_cleansed' and reviews_per_month (proxy for demand).",
+    notation = "none"
+  )
+
+```
+
+
+```{r}
+
+      #| echo: false
+#| message: false
+#| warning: false
+
+airbnb <- read_csv("listings.csv")
+
+DataKeyVariable <- airbnb |> select(price,neighbourhood_cleansed,
+                                    accommodates,
+                                    review_scores_rating, 
+                                    reviews_per_month)
+
+n_raw <- nrow(DataKeyVariable)
+
+```
+
+```{r}
+
+      #| label: data-cleaning
+#| echo: false
+#| message: false
+#| warning: false
+#| include: false
+
+# clean and transform variables
+DataFiltered <- DataKeyVariable |>
+  mutate(
+    price = parse_number(price)
+  ) |>
+  filter(
+    !is.na(price),
+    !is.na(review_scores_rating),
+    !is.na(reviews_per_month),
+    !is.na(neighbourhood_cleansed)
+  )
+
+```
+
+
+```{r}
+
+      #| label: tbl-exout
+#| echo: false
+#| message: false
+#| warning: false
+#| include: false
+
+numeric_df <- DataFiltered |>
+  select(price, accommodates, review_scores_rating, reviews_per_month)
+
+# outlier count - not included in the report
+outlier_list <- map(names(numeric_df), ~ {
+  var_sym <- sym(.x)
+
+  numeric_df |>
+    identify_outliers(!!var_sym) |>
+    summarise(
+      Variable         = .x,
+      Total_outliers   = sum(is.outlier,  na.rm = TRUE),
+      Extreme_outliers = sum(is.extreme,  na.rm = TRUE)
+    )
+})
+
+```
+
+```{r}
+
+      #| label: tbl-wrng
+#| tbl-cap: "Numeric variable data wrangling and outlier removal."
+#| echo: false
+#| warning: false
+#| message: false
+
+# add row index
+DataFiltered <- DataFiltered |>
+  mutate(.row = row_number())
+
+# remove impossible / uninformative values
+DataFiltered <- DataFiltered |>
+  filter(
+    price > 0,
+    reviews_per_month > 0,
+    review_scores_rating > 0
+  )
+
+# identify extreme outliers for each numeric variable
+price_out <- DataFiltered |>
+  identify_outliers(price)
+
+acc_out <- DataFiltered |>
+  identify_outliers(accommodates)
+
+rating_out <- DataFiltered |>
+  identify_outliers(review_scores_rating)
+
+rpm_out <- DataFiltered |>
+  identify_outliers(reviews_per_month)
+
+price_extreme  <- price_out  |> filter(is.extreme) |> pull(.row)
+acc_extreme    <- acc_out    |> filter(is.extreme) |> pull(.row)
+rating_extreme <- rating_out |> filter(is.extreme) |> pull(.row)
+rpm_extreme    <- rpm_out    |> filter(is.extreme) |> pull(.row)
+
+# combine all row indices to remove
+extreme_ids <- unique(c(price_extreme, acc_extreme, rating_extreme, rpm_extreme))
+
+# remove rows with extreme outliers and drop helper column
+DataClean <- DataFiltered |>
+  filter(!.row %in% extreme_ids) |>
+  select(-.row)
+
+n_clean <- nrow(DataClean)
+
+```
+
+
+```{r}
+
+    #| label: tbl-grpcollaps
+#| tbl-cap: "Neighbourhood variable collapsed into low, middle, and high demand groups."
+#| echo: false
+#| warning: false
+#| message: false
+
+# compute mean monthly reviews per neighbourhood
+neigh_demand <- DataClean |>
+  group_by(neighbourhood_cleansed) |>
+  summarise(
+    mean_rpm = mean(reviews_per_month, na.rm = TRUE),
+    .groups  = "drop"
+  )
+
+# 20th and 80th percentile thresholds
+q20 <- quantile(neigh_demand$mean_rpm, probs = c(0.20, 0.80), na.rm = TRUE)
+
+# classify neighbourhoods into Low / Middle / High demand groups
+neigh_demand <- neigh_demand |>
+  mutate(
+    neigh_group = case_when(
+      mean_rpm >= q20[2] ~ "High",
+      mean_rpm <= q20[1] ~ "Low",
+      TRUE               ~ "Middle"
+    )
+  )
+
+# merge group back into main dataset
+DataClean <- DataClean |>
+  left_join(
+    neigh_demand |> select(neighbourhood_cleansed, neigh_group),
+    by = "neighbourhood_cleansed"
+  )
+
+head(DataClean,7)
+nrow(DataClean)
+names(DataClean)
+```
+# Plotting multiple linear regression model
+
+## Research Question: Part 1
+
+* How strongly do accommodation capacity, review rating, and neighbourhood 
+demand group predict nightly price?
+
+The population regression model is:
+$$
+E(Y) = \beta_0 + \beta_1 X_1 + \beta_2 X_2 + \beta_3 X_3
+$$
+where:  
+- $Y$ = nightly price  
+- $X_1$ = accommodates  
+- $X_2$ = review\_scores\_rating  
+- $X_3$ = neighbourhood group (Low, Middle, High)
+
+The primary interest is whether the coefficients differ from zero:
+
+$$
+H_0: \beta_1 = 0
+H_0: \beta_2 = 0
+H_0: \beta_3 = 0
+$$
+```{r}
+mrm_model <- lm(log(price) ~ accommodates + review_scores_rating + neigh_group, data = DataClean)
+summary(mrm_model)
+
+
+
+```
+
+### We fit a multiple linear regression model on price with accommodates, neigh_group and review_scores_rating, the result can be interpreted as:
+ 
+Fitted Model Equation:
+
+* price = -117.21 + 38.38(accommodates) + 40.05(review_scores_rating) 
+  - 66.24(neigh_groupLow) - 51.08(neigh_groupMiddle)
+ 
+ * For every one unit increase of guests in accommodates, the price increases by **$38.37**.
+ * For every one unit increase in review_scores_rating, the price increases by **$40.05**.
+ 
+**neigh_group is categorical predictor so "R" automatically chooses "High-demand neighbourhood" as reference group(alphabetical order).**
+
+ * Listing in low-demand neighbourhoods cost $66.23 less on average compared to high-demand neighbourhood.
+ * Listing in middle-demand neighbourhoods cost $51.07 less on average compared to high-demand neighbourhood.
+ 
+### Statistical Significance of Individual Coefficients:
+
+### All predictors are statistically significant at α = 0.05.
+
+*   - accommodates: t = 93.06, p < 2e-16 → Reject $H_0$
+*   - review_scores_rating: t = 11.27, p < 2e-16 → Reject $H_0$
+*   - neigh_groupLow: t = -22.53, p < 2e-16 → Reject $H_0$
+*   - neigh_groupMiddle: t = -32.60, p < 2e-16 → Reject $H_0$
+
+**Conclusion: All predictors significantly contribute to explaining price variation.**
+
+### Overall Model Significance:
+* F-statistic: 2719 on 4 and 11939 DF, p-value < 2.2e-16
+* The model as a whole is statistically significant - at least one 
+* predictor has a non-zero coefficient.
+ 
+It can be concluded that an Airbnb charges more for :
+
+* Accommodating more people.
+
+* Higher reviews
+
+* Being located in high-demand neighbourhood.
+
+### All predictors are statistically significant with P-value = 2.2e-16 < 0.05
+
+### R square = 0.48 which means this model explains 48% of price variation.
+
+
+Generating diagnostic plots to check if model assumptions are satisfied.
+
+```{r}
+  
+    autoplot(mrm_model)
+
+```
+### Based on the diagnostic plots :
+
+* (1). Residuals vs Fitted (Linearity):
+The plot shows a mostly horizontal trend with slight curvature. This suggests that the linearity assumption is reasonably satisfied, although small deviations are present.
+
+* (2). Normal Q–Q Plot (Normality):
+The residuals deviate from the reference line in the upper tail, indicating right-skewness and a moderate violation of normality. This is expected for price data and is less concerning with a large sample size.
+
+* (3). Scale–Location Plot (Homoscedasticity):
+The spread of residuals increases slightly at higher fitted values, suggesting mild heteroscedasticity. However, the violation is not severe and the model remains acceptable for practical interpretation.
+
+* (4). Residuals vs Leverage: Most points lie within the safe boundaries. 
+
+
+# Hypothesis test : Part 2
+
+### Research Question : Do High-demand and Low-demand neighbourhoods differ in either average accommodation capacity or average review rating?
+
+### Average accommodation capacity:
+
+Define the population means:  
+
+$\mu_{A,High}$, $\mu_{A,Low}$: mean accommodates  
+
+Null hypotheses:  
+$$
+H_{0,1}: \mu_{A,High} = \mu_{A,Low}
+$$
+
+Alternative hypotheses: 
+$$
+H_{A,1}: \mu_{A,High} \neq \mu_{A,Low} 
+$$
+
+* We will be using Independent sample Welch T-test to compare the average accommodation capacity
+ between High-demand and Low-demand neighbourhoods.
+ 
+ 
+```{r}
+
+      min_max = DataClean |> filter(neigh_group == "High" | neigh_group == "Low")
+      
+      t.test(data = min_max, accommodates ~ neigh_group)
+      
+     
+
+
+```
+* We reject the null hypothesis because P-value 4.019e-05 < 0.05
+
+* High-demand neighbourhoods have a statistically significant higher average accommodation
+capacity compared to Low-demand neighbourhoods.
+
+* On average, listings in High-demand neighbourhoods area accommodate 0.29 guests more
+than the Low-demand neighbourhoods(95% CI = [0.15, 0.43]).
+
+
+### Average review score rating:
+
+$\mu_{R,High}$, $\mu_{R,Low}$: mean review score rating
+
+
+Null hypotheses:  
+$$
+H_{0,2}: \mu_{R,High} = \mu_{R,Low}
+$$
+Alternative hypotheses: 
+$$
+H_{A,2}: \mu_{R,High} \neq \mu_{R,Low}
+$$
+* We will be using Independent sample Welch T-test to compare the average Review score rating
+ between High-demand and Low-demand neighbourhoods.
+ 
+```{r}
+      
+      t.test(data = min_max, review_scores_rating ~ neigh_group)
+      
+
+```
+* We reject the null hypothesis because P-value 0.0001819 < 0.05
+
+* High-demand neighbourhoods have a statistically significant higher average review score rating
+compared to Low-demand neighbourhoods.
+
+* On average, listings in High-demand neighbourhoods area has 0.032 point higher rating more
+than the Low-demand neighbourhoods(95% CI = [0.015, 0.049]).
+
+* While statistically significant, the difference between the two neighbourhoods is very small 0.032
+on a 0-5 scale meaning, both the neighbourhoods maintain very similar rating score.
+
+## Limitations:
+
+* Mild violations of regression assumptions.
+
+* The model explains 48% of variation meaning it cannot capture all the factors affecting price.
+
+* Welch T-test only compares High-demand and Low-demand neighbourhoods, Middle-demand were excluded.
+
+* neigh_group was artificially constructed by collapsing neighbourhoods based on the 20th and 80th percentiles of reviews per month. This may not reflect actual demand differences.
+
+## Conclusion:
+
+The multiple linear regression model proved that nightly Airbnb prices are significantly
+influenced by accommodation capacity, review score rating and neighbourhood demand level.
+
+Each predictors plays an important role and explains 48% of the variation.
+
+The welch T-tests provided an insight about High-demand vs Low-demand neighbourhoods revealing that,
+High-demand neighbourhood tend to have more accommodation and review score rating compared
+to Low-demand neighbourhood.
+
+All in all, the analysis supports the proposed research questions and provides meaningful 
+insight about factors affecting Airbnb pricing in Toronto.
+ 

@@ -1,0 +1,331 @@
+---
+title: "An Analysis of Toronto Short-Term Rentals - Part 3 (Final Writeup)"
+author:
+  - name: "Group 12"
+  - name: "Yiping Liu (ID: 0870378)"
+  - name: "Dmitry Mishchenko (ID: 0512776)"
+  - name: "Mohammed Muzammil (ID: 0885649)"
+  - name: "Fawaz Yahya (ID: 0867165)"
+date: "2025-11-15"
+format:
+  pdf:
+    number-sections: true
+    toc: true
+    fontsize: 11pt
+    geometry:
+      - margin=1in
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+```{r}
+#| label: setup
+#| echo: false
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(janitor)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+library(infer)
+library(broom)
+library(rstatix)
+library(psych)
+library(ggplot2)
+library(ggfortify)
+
+theme_set(theme_bw()) 
+```
+
+```{r}
+#| label: load-and-clean
+airbnb <- read_csv("listings.csv", show_col_types = FALSE)
+
+DataKeyVariable <- airbnb |>
+  select(price, neighbourhood_cleansed, accommodates,
+         review_scores_rating, reviews_per_month) |>
+  mutate(price = parse_number(price))
+
+n_raw <- nrow(DataKeyVariable)
+
+# Active listings only
+DataFiltered <- DataKeyVariable |>
+  filter(
+    !is.na(price),
+    !is.na(review_scores_rating),
+    !is.na(reviews_per_month),
+    !is.na(neighbourhood_cleansed),
+    price > 0,
+    reviews_per_month > 0,
+    review_scores_rating > 0
+  )
+
+# Build neighbourhood demand groups using reviews_per_month as a demand proxy
+neigh_demand <- DataFiltered |>
+  group_by(neighbourhood_cleansed) |>
+  summarise(mean_rpm = mean(reviews_per_month), .groups = "drop")
+
+q20_80 <- quantile(neigh_demand$mean_rpm, probs = c(0.20, 0.80))
+
+neigh_demand <- neigh_demand |>
+  mutate(neigh_group = case_when(
+    mean_rpm >= q20_80[2] ~ "High",
+    mean_rpm <= q20_80[1] ~ "Low",
+    TRUE ~ "Middle"
+  )) |>
+  mutate(neigh_group = factor(neigh_group, levels = c("High", "Middle", "Low")))
+
+DataClean <- DataFiltered |>
+  left_join(neigh_demand |> select(neighbourhood_cleansed, neigh_group),
+            by = "neighbourhood_cleansed")
+
+n_clean <- nrow(DataClean)
+
+n_raw
+n_clean
+
+```
+## Executive Summary
+This report examines the factors that influence nightly Airbnb prices in Toronto using data from the Inside Airbnb project (September 2025). The primary objective is to assess how accommodation capacity, guest review ratings, and neighbourhood-level demand are associated with listing prices.
+
+Exploratory analysis revealed that nightly prices are strongly right-skewed, motivating the use of a log transformation of price to better satisfy linear regression assumptions. A multiple linear regression model was fitted with `log(price)` as the response variable and `accommodates`, `review_scores_rating`, and `neigh_group` as predictors.
+
+All three predictors were found to be statistically significant. Holding other variables constant, each additional guest capacity is associated with an approximate 25% increase in nightly price. A one-point increase in review score rating corresponds to an estimated 32% increase in price. Listings located in low-demand neighbourhoods charge about 37% less than comparable listings in high-demand areas, while listings in middle-demand neighbourhoods charge roughly 29% less. Overall, the model explains about 50% of the variation in nightly price.
+
+In addition to the regression analysis, a Welch two-sample t-test was conducted to compare mean `log(price)` between high- and low-demand neighbourhoods. The test indicated a statistically significant difference, providing further evidence that neighbourhood demand plays an important role in Airbnb pricing.
+
+Overall, the results suggest that listing size, guest ratings, and neighbourhood demand are key drivers of Airbnb prices in Toronto. These findings provide insight into how pricing varies across the city and highlight the importance of both property characteristics and location in the short-term rental market.
+
+## Introduction and Background
+Short-term rentals play an important role in Toronto’s housing and tourism markets. Platforms such as Airbnb allow property owners to rent accommodations to short-term guests, creating variation in nightly prices across listings and neighbourhoods. Understanding the factors that drive these price differences is useful for hosts setting prices, guests comparing options, and policymakers monitoring short-term rental activity.
+
+This analysis uses data from the Inside Airbnb project, which provides publicly available information on Airbnb listings in Toronto. The dataset includes listing characteristics, review information, and neighbourhood identifiers. For this project, we focus on listings that have received reviews, representing active listings with observable pricing and review activity.
+
+The primary outcome of interest is the nightly listing price. Preliminary exploration showed that price is highly right-skewed, with a small number of very expensive listings. To address this skewness and better meet linear regression assumptions, we analyze the natural logarithm of price, `log(price)`, rather than raw price values.
+
+Three explanatory variables are considered based on exploratory analysis and course concepts. The variable `accommodates` captures the size of the listing and reflects its capacity to host guests. The variable `review_scores_rating` measures overall guest satisfaction and serves as a proxy for perceived quality. Finally, neighbourhood-level demand is represented using `neigh_group`, a categorical variable that classifies neighbourhoods into high-, middle-, and low-demand groups based on average review activity.
+
+The primary research question guiding this analysis is:
+
+**To what extent do accommodation capacity, review scores, and neighbourhood demand explain variation in nightly Airbnb prices in Toronto?**
+
+To address this question, we use multiple linear regression with `log(price)` as the response variable. In addition, a hypothesis test is conducted to compare average prices across neighbourhood demand groups, providing complementary inferential evidence.
+
+## Exploratory Data Analysis
+Exploratory data analysis was conducted to understand the distribution of key variables and to assess whether linear regression is an appropriate modelling framework. This section summarizes only the patterns most relevant to the final analysis.
+
+### Distribution of Nightly Price
+```{r}
+ggplot(DataClean, aes(x = price)) +
+  geom_histogram(bins = 40, fill = "grey70", color = "white") +
+  labs(
+    title = "Distribution of Nightly Airbnb Prices",
+    x = "Price (CAD)",
+    y = "Count"
+  )
+
+```
+Nightly price exhibits strong right-skewness, with most listings priced below approximately $200 and a long upper tail of higher-priced listings. The presence of this skewness and unequal spread motivates the use of a log transformation of price in the regression model.
+
+### Price and Accommodation Capacity
+```{r}
+ggplot(DataClean, aes(x = accommodates, y = price)) +
+geom_point(alpha = 0.25) +
+geom_smooth(method = "lm", se = FALSE) +
+labs(
+title = "Price vs. Accommodation Capacity",
+x = "Accommodates",
+y = "Price (CAD)"
+)
+```
+
+Listings that accommodate more guests tend to charge higher nightly prices. The positive association supports including accommodates as a predictor in the regression model. The relationship appears more linear when price is viewed on a logarithmic scale, further justifying the transformation.
+
+### Price Across Neighbourhood Demand Groups
+```{r}
+ggplot(DataClean, aes(x = neigh_group, y = price)) +
+geom_boxplot(fill = "grey70") +
+labs(
+title = "Price by Neighbourhood Demand Group",
+x = "Neighbourhood Demand Group",
+y = "Price (CAD)"
+)
+
+```
+Prices differ across neighbourhood demand groups. Listings in high-demand neighbourhoods tend to have higher median prices and greater variability, while low-demand neighbourhoods exhibit lower and more concentrated price distributions. This pattern supports including neigh_group as a categorical predictor.
+
+### Price and Review Scores
+```{r}
+ggplot(DataClean, aes(x = review_scores_rating, y = price)) +
+geom_point(alpha = 0.25) +
+geom_smooth(method = "lm", se = FALSE) +
+labs(
+title = "Price vs. Review Scores Rating",
+x = "Review Score Rating",
+y = "Price (CAD)"
+)
+
+```
+
+Higher review scores are associated with slightly higher prices, though the relationship is weaker than that observed for accommodation capacity. This suggests that review scores may contribute modestly to explaining price variation.
+
+### EDA-to-Model Connection
+The EDA findings directly inform the modelling decisions. The strong right-skew in price motivates modelling log(price) rather than raw price values. The positive relationship between price and accommodates supports its inclusion as a key predictor, while observed differences across neighbourhood demand groups justify incorporating neigh_group as a categorical variable. Review scores show a weaker but positive association with price, making them a reasonable secondary predictor. Together, these observations support the use of a multiple linear regression model with log(price) as the response.
+
+## Methodology
+
+### Regression Model
+To examine how listing characteristics and neighbourhood demand relate to nightly Airbnb prices, we use a multiple linear regression model. Linear regression is appropriate because the response variable is quantitative and the goal is to assess how several predictors jointly explain variation in price.
+
+Based on the exploratory analysis, the response variable is defined as the natural logarithm of nightly price, `log(price)`. The log transformation is used to reduce right-skewness, stabilize variance, and improve the linearity of relationships between the response and predictors.
+
+The final regression model is specified as:
+$$
+\log(\text{price}) = \beta_0 + \beta_1(\text{accommodates}) + \beta_2(\text{review\_scores\_rating}) + \beta_3(\text{neigh\_group}) + \varepsilon
+$$
+
+where:
+- `accommodates` represents the maximum number of guests the listing can host,
+- `review_scores_rating` measures overall guest satisfaction,
+- `neigh_group` is a categorical variable indicating neighbourhood demand level (High, Middle, Low),
+- and \(\varepsilon\) represents random error.
+
+### Model Assumptions
+
+The linear regression model relies on several key assumptions discussed in class:
+
+1. **Linearity** — The relationship between each predictor and `log(price)` is approximately linear.
+2. **Independence** — Each listing is treated as an independent observation.
+3. **Constant variance** — The variance of residuals is approximately constant across fitted values.
+4. **Normality of residuals** — Residuals are approximately normally distributed.
+
+These assumptions are evaluated using diagnostic plots in the Results section.
+
+### Hypothesis Test
+In addition to the regression analysis, a hypothesis test is conducted to compare average prices across neighbourhood demand groups. Specifically, we test whether the mean `log(price)` differs between High-demand and Low-demand neighbourhoods.
+
+Let:
+- \(\mu_{High}\) be the population mean of `log(price)` in High-demand neighbourhoods,
+- \(\mu_{Low}\) be the population mean of `log(price)` in Low-demand neighbourhoods.
+
+The hypotheses are:
+\[
+H_0: \mu_{High} = \mu_{Low}
+\]
+\[
+H_A: \mu_{High} \neq \mu_{Low}
+\]
+
+Because the two groups may have unequal variances, we use Welch’s two-sample *t*-test. This test complements the regression analysis by providing direct inferential evidence on neighbourhood-level price differences.
+
+### Alternative Approaches Considered
+Other modelling approaches, such as including additional predictors or using more complex regression techniques, were considered. However, given the course scope and the exploratory findings, a multiple linear regression with a log-transformed response provides a clear and interpretable framework that aligns with the assumptions and methods covered in class.
+
+\newpage
+
+## Results
+```{r}
+
+#| label: fit-final-model
+model_final <- lm(
+  log(price) ~ accommodates + review_scores_rating + neigh_group,
+  data = DataClean
+)
+
+```
+
+### Linear Regression Results
+Fitting the model
+```{r}
+
+#| label: tbl-coef
+#| tbl-cap: "Estimated regression coefficients for the final model."
+
+model_final |>
+  broom::tidy() |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+```
+```{r}
+#| label: tbl-glance
+#| tbl-cap: "Model summary statistics."
+
+model_final |>
+  broom::glance() |>
+  select(r.squared, adj.r.squared, sigma, statistic, p.value) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+The fitted regression model is:
+$$
+\log(\text{price}) =
+\beta_0 +
+\beta_1(\text{accommodates}) +
+\beta_2(\text{review\_scores\_rating}) +
+\beta_3(\text{neigh\_group}) +
+\varepsilon
+$$
+Holding all other predictors constant, the estimated coefficients indicate that listings accommodating more guests tend to charge higher nightly prices. Because the response variable is log-transformed, the coefficients can be interpreted approximately as percentage changes.
+
+Specifically, each additional guest accommodated is associated with an average increase of about 22% in nightly price. Higher review scores are also associated with higher prices: a one-point increase in review score rating corresponds to an approximate 18% increase in price.
+
+Neighbourhood demand is an important predictor. Relative to listings in high-demand neighbourhoods, listings in middle-demand areas charge approximately 33% less on average, while listings in low-demand neighbourhoods charge roughly 48% less, holding other factors constant.
+
+Overall, the model explains approximately 49% of the variation in nightly Airbnb prices, indicating a strong relationship between price and the selected predictors.
+
+### Diagnostic Plots
+```{r}
+#| label: fig-diagnostics
+#| fig-cap: "Diagnostic plots for the final regression model."
+library(ggfortify)
+autoplot(model_final)
+```
+
+The diagnostic plots suggest that the assumptions of linear regression are reasonably met. The residuals versus fitted values plot does not show strong non-linearity, and the scale-location plot indicates roughly constant variance. The normal Q–Q plot shows moderate departures in the tails, which is expected given the skewed nature of price data, but no severe violations are evident. No single observation appears to exert undue influence on the fitted model.
+
+### Hypothesis Test
+We also test whether the average nightly price differs between listings in high-demand and low-demand neighbourhoods. Because the two neighbourhood groups may have unequal variances, we use Welch’s two-sample t-test to compare the mean log-transformed prices. The test assumes independent observations and approximate normality of the sample means, which is reasonable given the large sample sizes.
+
+```{r}
+#| label: neigh-ttest
+t_test_neigh <- t.test(
+  log(price) ~ neigh_group,
+  data = DataClean |> filter(neigh_group %in% c("High", "Low"))
+)
+
+t_test_neigh
+
+```
+The test indicates a statistically significant difference in mean log(price) between high-demand and low-demand neighbourhoods. The estimated mean difference is positive, with a p-value well below 0.05, providing strong evidence that listings in high-demand neighbourhoods charge higher nightly prices on average.
+
+## Discussion
+The regression results provide clear insight into the factors associated with nightly Airbnb prices in Toronto. As shown in Table @tbl-coef, accommodation capacity is the strongest predictor in the model. Holding all other variables constant, listings that can host more guests tend to charge substantially higher prices. This finding is intuitive, as larger properties typically offer more space and amenities, making them more valuable to guests.
+
+Review scores are also positively associated with price, although the effect is smaller. Higher-rated listings command a modest price premium, which is consistent with the idea that guest satisfaction reflects perceived quality. While the relationship is weaker than that of accommodation capacity, it remains statistically significant and contributes meaningfully to explaining price variation.
+
+Neighbourhood demand plays an important role in pricing. Relative to high-demand neighbourhoods, listings in middle- and low-demand areas charge noticeably lower prices on average @tbl-coef. This aligns with expectations that location and local demand influence what hosts are able to charge, even after controlling for listing size and review quality. The additional hypothesis test comparing high- and low-demand neighbourhoods reinforces this conclusion by providing direct inferential evidence of a difference in average prices between these groups.
+
+Overall, the model explains approximately half of the variation in nightly price (Table @tbl-model-summary), which is substantial given the limited number of predictors included. This suggests that while accommodation capacity, review scores, and neighbourhood demand are key drivers of price, other unobserved factors likely also contribute to pricing decisions.
+
+Several limitations should be noted:
+
+- **Selection bias:** The analysis focuses on active listings with reviews, which may exclude newer or less active properties and could introduce selection bias.
+
+- **Independence of observations:** The independence assumption may be violated if some hosts manage multiple listings or if listings within the same building share unobserved characteristics.
+
+- **Normality of residuals:** Although the diagnostic plots in Figure @fig-diagnostics suggest that the linear regression assumptions are largely satisfied, some deviation from normality remains in the residuals, reflecting the inherent variability in nightly price data.
+
+Finally, important predictors such as room type, amenities, proximity to downtown, and seasonal effects are not included in the model. Incorporating these variables could improve explanatory power and provide a more complete picture of Airbnb pricing dynamics in future analyses.
+
+## Conclusion
+This project examined how accommodation capacity, review scores, and neighbourhood-level demand are associated with nightly Airbnb prices in Toronto. Using data from the Inside Airbnb project and a multiple linear regression model with a log-transformed price response, we assessed the relative importance of these factors in explaining price variation across listings.
+
+The results show that accommodation capacity is the strongest predictor of price, with larger listings charging substantially higher nightly rates. Review scores are also positively associated with price, indicating that higher-rated listings command a modest premium. In addition, neighbourhood demand plays a significant role: listings in high-demand areas charge higher prices on average than those in middle- or low-demand neighbourhoods. These findings are supported both by the regression analysis and by a supplementary hypothesis test comparing prices across neighbourhood groups.
+
+Overall, the analysis highlights the importance of both property characteristics and location in determining Airbnb prices. While the model explains a substantial portion of price variation, it also suggests that additional factors such as amenities, room type, and proximity to key areas could further improve understanding of pricing dynamics. These results provide a useful foundation for future analyses of short-term rental markets and pricing behavior.
+
+## Acknowledgment
+We thank all members of Group 12 for their collaboration and contributions throughout the data preparation, analysis, and writing of this report. OpenAI’s ChatGPT was used to assist with code debugging, table formatting, and grammar refinement during the preparation of this report. All statistical analyses, interpretation of results, and final writing decisions were made by the authors.
+
